@@ -157,6 +157,8 @@ class DruidApp {
         this.pendingFilenameCapture = null;
         this.activeFileName = null;
         this.reconnectAfterRestartTimer = null;
+        this.toastTimer = null;
+        this.toastElement = null;
         this.fileEntries = [];
         this.openMenuFile = null;
         this.isExplorerCollapsed = true;
@@ -272,6 +274,28 @@ class DruidApp {
         this.elements.output.scrollTop = this.elements.output.scrollHeight;
     }
 
+    showToast(message, type = 'info') {
+        if (!this.toastElement) {
+            this.toastElement = document.createElement('div');
+            this.toastElement.className = 'app-toast';
+            document.body.appendChild(this.toastElement);
+        }
+
+        this.toastElement.className = `app-toast visible ${type}`;
+        this.toastElement.textContent = message;
+
+        if (this.toastTimer) {
+            clearTimeout(this.toastTimer);
+        }
+
+        this.toastTimer = setTimeout(() => {
+            if (this.toastElement) {
+                this.toastElement.className = 'app-toast';
+            }
+            this.toastTimer = null;
+        }, 2600);
+    }
+
     escapeHtml(value) {
         return String(value)
             .replace(/&/g, '&amp;')
@@ -345,7 +369,11 @@ class DruidApp {
 
     async sendReplCommand(code) {
         this.outputLine(`>> ${code}`);
-        const shouldRefreshFiles = /\bfs_[a-zA-Z0-9_]*\b/.test(code);
+        const containsFsCommand = /\bfs_[a-zA-Z0-9_]*\b/.test(code);
+        const containsFsRunFile = /\bfs_run_file\s*\(/.test(code);
+        const containsFsRemoveFile = /\bfs_remove_file\s*\(/.test(code);
+        const containsFsReformat = /\bfs_reformat\s*\(/.test(code);
+        const shouldAutoOpenExplorer = containsFsRunFile || containsFsRemoveFile || containsFsReformat;
 
         if (this.commandHistory.length === 0 || this.commandHistory[this.commandHistory.length - 1] !== code) {
             this.commandHistory.push(code);
@@ -357,6 +385,22 @@ class DruidApp {
             this.historyIndex = -1;
             this.currentInput = '';
             return;
+        }
+
+        if (containsFsRemoveFile) {
+            const singleTargetMatch = code.match(/\bfs_remove_file\s*\(\s*['"]([^'"]+)['"]\s*\)/);
+            const promptLabel = singleTargetMatch
+                ? `Delete ${singleTargetMatch[1]}?`
+                : 'Run fs_remove_file command?';
+            if (!window.confirm(promptLabel)) {
+                return;
+            }
+        }
+
+        if (containsFsReformat) {
+            if (!window.confirm('Reformat filesystem? This will erase all files on your iii device.')) {
+                return;
+            }
         }
 
         try {
@@ -374,8 +418,11 @@ class DruidApp {
                 await this.delay(1);
             }
 
-            if (shouldRefreshFiles) {
+            if (shouldAutoOpenExplorer) {
                 this.setExplorerCollapsed(false);
+            }
+
+            if (containsFsCommand) {
                 await this.delay(150);
                 await this.refreshFileList();
             }
@@ -953,7 +1000,7 @@ class DruidApp {
         }
 
         if (this.fileEntries.some((entry) => entry.name === newName)) {
-            this.outputLine(`Rename canceled: ${newName} already exists`);
+            this.showToast(`Rename blocked: ${newName} already exists`, 'warn');
             return;
         }
 
@@ -1039,6 +1086,10 @@ class DruidApp {
     async reformatFs() {
         if (!this.iiiDevice.isConnected) {
             this.outputLine('Error: Not connected to usb device');
+            return;
+        }
+
+        if (!window.confirm('Reformat filesystem? This will erase all files on your iii device.')) {
             return;
         }
 
