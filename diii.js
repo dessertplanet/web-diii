@@ -97,7 +97,7 @@ class iiiConnection {
             }
 
             if (this.onConnectionChange) {
-                this.onConnectionChange(false, 'device disconnected. please reconnect >');
+                this.onConnectionChange(false, 'device disconnected');
             }
         }
     }
@@ -154,11 +154,15 @@ class DruidApp {
         this.historyIndex = -1;
         this.currentInput = '';
         this.pendingLuaCapture = null;
+        this.pendingFilenameCapture = null;
+        this.activeFileName = null;
         this.fileEntries = [];
         this.openMenuFile = null;
+        this.isExplorerCollapsed = true;
 
         this.cacheElements();
         this.bindEvents();
+        this.setExplorerCollapsed(true);
         this.checkBrowserSupport();
         this.renderFileList();
 
@@ -171,7 +175,8 @@ class DruidApp {
 
             fileExplorerPane: document.getElementById('fileExplorerPane'),
             fileList: document.getElementById('fileList'),
-            refreshFilesBtn: document.getElementById('refreshFilesBtn'),
+            toggleExplorerBtn: document.getElementById('toggleExplorerBtn'),
+            explorerChevron: document.getElementById('explorerChevron'),
 
             connectionBtn: document.getElementById('replConnectionBtn'),
             replStatusIndicator: document.getElementById('replStatusIndicator'),
@@ -182,7 +187,8 @@ class DruidApp {
             replPane: document.getElementById('replPane'),
             uploadBtn: document.getElementById('uploadBtn'),
             restartBtn: document.getElementById('restartBtn'),
-            helpBtn: document.getElementById('helpBtn'),
+            bootloaderBtn: document.getElementById('bootloaderBtn'),
+            reformatBtn: document.getElementById('reformatBtn'),
             clearBtn: document.getElementById('clearBtn'),
 
             fileInput: document.getElementById('fileInput'),
@@ -199,10 +205,11 @@ class DruidApp {
 
         on(this.elements.connectionBtn, 'click', () => this.toggleConnection());
         on(this.elements.replInput, 'keydown', (e) => this.handleReplInput(e));
-        on(this.elements.refreshFilesBtn, 'click', () => this.refreshFileList());
+        on(this.elements.toggleExplorerBtn, 'click', () => this.toggleExplorer());
         on(this.elements.uploadBtn, 'click', () => this.openUploadPicker());
         on(this.elements.restartBtn, 'click', () => this.restartDevice());
-        on(this.elements.helpBtn, 'click', () => this.showHelp());
+        on(this.elements.bootloaderBtn, 'click', () => this.bootloaderDevice());
+        on(this.elements.reformatBtn, 'click', () => this.reformatFs());
         on(this.elements.clearBtn, 'click', () => this.clearOutput());
         on(this.elements.fileInput, 'change', (e) => this.handleFileSelect(e));
         on(document, 'click', (e) => this.handleDocumentClick(e));
@@ -227,6 +234,21 @@ class DruidApp {
         if (this.elements.connectionBtn) this.elements.connectionBtn.disabled = true;
         this.outputLine('ERROR: Web Serial API not supported in this browser.');
         this.outputLine('Please use Chrome, Edge, or Opera.');
+    }
+
+    toggleExplorer() {
+        this.setExplorerCollapsed(!this.isExplorerCollapsed);
+    }
+
+    setExplorerCollapsed(collapsed) {
+        this.isExplorerCollapsed = Boolean(collapsed);
+        this.elements.fileExplorerPane?.classList.toggle('collapsed', this.isExplorerCollapsed);
+        if (this.elements.toggleExplorerBtn) {
+            this.elements.toggleExplorerBtn.setAttribute('aria-expanded', String(!this.isExplorerCollapsed));
+        }
+        if (this.elements.explorerChevron) {
+            this.elements.explorerChevron.textContent = this.isExplorerCollapsed ? '›' : '‹';
+        }
     }
 
     outputText(text) {
@@ -311,6 +333,7 @@ class DruidApp {
 
     async sendReplCommand(code) {
         this.outputLine(`>> ${code}`);
+        const shouldRefreshFiles = /\bfs_[a-zA-Z0-9_]*\b/.test(code);
 
         if (this.commandHistory.length === 0 || this.commandHistory[this.commandHistory.length - 1] !== code) {
             this.commandHistory.push(code);
@@ -338,6 +361,12 @@ class DruidApp {
                 await this.iiiDevice.writeLine(line);
                 await this.delay(1);
             }
+
+            if (shouldRefreshFiles) {
+                await this.delay(150);
+                await this.refreshFileList();
+            }
+
             this.elements.replInput.value = '';
             this.historyIndex = -1;
             this.currentInput = '';
@@ -358,6 +387,7 @@ class DruidApp {
         this.outputLine('Connecting to iii device...');
         const connected = await this.iiiDevice.connect();
         if (connected) {
+            this.setExplorerCollapsed(false);
             this.outputLine('Connected! Ready to code.');
             this.outputLine('Drag and drop a lua file here to auto-upload.');
             this.outputLine('');
@@ -370,6 +400,7 @@ class DruidApp {
         this.outputLine('');
         this.outputLine('Disconnected from iii device.');
         this.outputLine('');
+        this.activeFileName = null;
         this.fileEntries = [];
         this.renderFileList();
     }
@@ -400,6 +431,10 @@ class DruidApp {
         if (!cleaned) return;
 
         if (this.handleLuaCaptureLine(cleaned)) {
+            return;
+        }
+
+        if (this.handleFilenameCaptureLine(cleaned)) {
             return;
         }
 
@@ -439,6 +474,30 @@ class DruidApp {
             .map((line) => line.replace(/\s+$/g, ''));
     }
 
+    formatSizeKb(bytes) {
+        const kb = (Number(bytes) || 0) / 1024;
+        return `${Math.round(kb)}kb`;
+    }
+
+    isInitFile(name) {
+        return name === 'init.lua' || name === 'init';
+    }
+
+    getSortedFileEntries() {
+        const entries = [...this.fileEntries];
+        return entries.sort((a, b) => {
+            const order = (name) => {
+                if (this.isInitFile(name)) return 0;
+                if (name === 'lib.lua') return 1;
+                return 2;
+            };
+
+            const rankDiff = order(a.name) - order(b.name);
+            if (rankDiff !== 0) return rankDiff;
+            return a.name.localeCompare(b.name);
+        });
+    }
+
     async openAndSelectRemoteFile(fileName) {
         const normalizedName = String(fileName || '').trim();
         if (!normalizedName) {
@@ -456,6 +515,8 @@ class DruidApp {
     async sendScriptTextToiii(fileName, text) {
         const baseName = fileName;
         const lines = this.getUploadLines(text);
+
+        await this.executeLuaCapture(`fs_remove_file(${this.luaQuote(baseName)})`);
 
         // Match diii upload protocol:
         // ^^s, <filename>, ^^f, ^^s, <file lines>, ^^w
@@ -539,18 +600,39 @@ class DruidApp {
             return;
         }
 
-        for (const entry of this.fileEntries) {
+        const sortedEntries = this.getSortedFileEntries();
+        const pinnedCount = sortedEntries.filter((entry) => entry.name === 'lib.lua' || this.isInitFile(entry.name)).length;
+
+        for (let index = 0; index < sortedEntries.length; index += 1) {
+            const entry = sortedEntries[index];
             const row = document.createElement('div');
             row.className = 'file-row';
 
+            const main = document.createElement('div');
+            main.className = 'file-main';
+            const isLibFile = entry.name === 'lib.lua';
+
+            const playBtn = document.createElement('button');
+            playBtn.className = `file-play-btn${this.activeFileName === entry.name ? ' active' : ''}`;
+            playBtn.type = 'button';
+            playBtn.textContent = '▶';
+            playBtn.setAttribute('aria-label', `run ${entry.name}`);
+            playBtn.addEventListener('click', async (event) => {
+                event.stopPropagation();
+                await this.runFile(entry.name);
+            });
+            main.appendChild(playBtn);
+
             const label = document.createElement('div');
             label.className = 'file-label';
-            label.textContent = `${entry.name} (${entry.size}b)`;
+            label.textContent = `${entry.name} (${this.formatSizeKb(entry.size)})`;
+
+            main.appendChild(label);
 
             const menuBtn = document.createElement('button');
             menuBtn.className = 'file-menu-btn';
             menuBtn.type = 'button';
-            menuBtn.textContent = '⋮';
+            menuBtn.textContent = '⋯';
             menuBtn.setAttribute('aria-label', `actions for ${entry.name}`);
             menuBtn.addEventListener('click', (event) => {
                 event.stopPropagation();
@@ -561,13 +643,17 @@ class DruidApp {
             const menu = document.createElement('div');
             menu.className = `file-menu${this.openMenuFile === entry.name ? ' open' : ''}`;
 
-            const actions = [
-                { label: 'make init.lua', fn: () => this.copyToInit(entry.name) },
-                { label: 'download', fn: () => this.downloadFile(entry.name) },
-                { label: 'run', fn: () => this.runFile(entry.name) },
-                { label: 'rename', fn: () => this.renameFile(entry.name) },
-                { label: 'delete', fn: () => this.deleteFile(entry.name) }
-            ];
+            const actions = isLibFile
+                ? [
+                    { label: 'download', fn: () => this.downloadFile(entry.name) },
+                    { label: 'delete', fn: () => this.deleteFile(entry.name) }
+                ]
+                : [
+                    { label: 'first', fn: () => this.copyToInit(entry.name) },
+                    { label: 'download', fn: () => this.downloadFile(entry.name) },
+                    { label: 'rename', fn: () => this.renameFile(entry.name) },
+                    { label: 'delete', fn: () => this.deleteFile(entry.name) }
+                ];
 
             for (const action of actions) {
                 const item = document.createElement('button');
@@ -583,10 +669,16 @@ class DruidApp {
                 menu.appendChild(item);
             }
 
-            row.appendChild(label);
+            row.appendChild(main);
             row.appendChild(menuBtn);
             row.appendChild(menu);
             this.elements.fileList.appendChild(row);
+
+            if (pinnedCount > 0 && index === pinnedCount - 1 && index < sortedEntries.length - 1) {
+                const separator = document.createElement('div');
+                separator.className = 'file-list-separator';
+                this.elements.fileList.appendChild(separator);
+            }
         }
     }
 
@@ -617,13 +709,45 @@ class DruidApp {
 
         if (!capture.started) return false;
 
-        if (line.startsWith('-- lua error:')) {
+        if (line.startsWith(capture.errorPrefix)) {
             capture.error = line;
             return true;
         }
 
         capture.lines.push(line);
         return true;
+    }
+
+    handleFilenameCaptureLine(line) {
+        const capture = this.pendingFilenameCapture;
+        if (!capture) return false;
+
+        const match = line.match(/^-- filename:\s*(.+)$/);
+        if (!match) return false;
+
+        clearTimeout(capture.timeoutId);
+        this.pendingFilenameCapture = null;
+        capture.resolve(match[1].trim());
+        return true;
+    }
+
+    async requestActiveFileName() {
+        if (!this.iiiDevice.isConnected) return null;
+        if (this.pendingFilenameCapture) {
+            throw new Error('File selection request already in progress');
+        }
+
+        const resultPromise = new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                this.pendingFilenameCapture = null;
+                reject(new Error('Timed out waiting for filename response'));
+            }, 2500);
+
+            this.pendingFilenameCapture = { resolve, reject, timeoutId };
+        });
+
+        await this.iiiDevice.writeLine('^^g');
+        return resultPromise;
     }
 
     async executeLuaCapture(commands) {
@@ -638,6 +762,7 @@ class DruidApp {
         const captureId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
         const beginToken = `__webdiii_begin:${captureId}`;
         const endToken = `__webdiii_end:${captureId}`;
+        const errorPrefix = '__webdiii_err:';
 
         const resultPromise = new Promise((resolve, reject) => {
             const timeoutId = setTimeout(() => {
@@ -648,6 +773,7 @@ class DruidApp {
             this.pendingLuaCapture = {
                 beginToken,
                 endToken,
+                errorPrefix,
                 started: false,
                 lines: [],
                 error: null,
@@ -666,7 +792,9 @@ class DruidApp {
         for (const rawLine of lines) {
             const line = String(rawLine).trim();
             if (!line) continue;
-            await this.iiiDevice.writeLine(line);
+            await this.iiiDevice.writeLine(
+                `do local __ok, __err = pcall(function() ${line} end); if not __ok then print(${this.luaQuote(errorPrefix)} .. tostring(__err)) end end`
+            );
         }
 
         await this.iiiDevice.writeLine(`print(${this.luaQuote(endToken)})`);
@@ -700,8 +828,14 @@ class DruidApp {
                 entries.push({ name, size });
             }
 
-            entries.sort((a, b) => a.name.localeCompare(b.name));
             this.fileEntries = entries;
+
+            try {
+                this.activeFileName = await this.requestActiveFileName();
+            } catch {
+                this.activeFileName = null;
+            }
+
             this.renderFileList();
         } catch (error) {
             this.outputLine(`File list error: ${error.message}`);
@@ -717,8 +851,9 @@ class DruidApp {
 
     async copyToInit(fileName) {
         try {
-            const content = await this.readRemoteFile(fileName);
-            await this.sendScriptTextToiii('init.lua', content);
+            await this.executeLuaCapture(
+                `local __d = fs_read_file(${this.luaQuote(fileName)}); if __d then fs_write_file('init.lua', __d) else error('copy failed: cannot read source file') end`
+            );
             this.outputLine(`Copied ${fileName} to init.lua`);
             await this.refreshFileList();
         } catch (error) {
@@ -746,10 +881,13 @@ class DruidApp {
 
     async runFile(fileName) {
         try {
+            await this.openAndSelectRemoteFile(fileName);
             const lines = await this.executeLuaCapture(`fs_run_file(${this.luaQuote(fileName)})`);
             for (const line of lines) {
                 this.outputLine(line);
             }
+            this.activeFileName = fileName;
+            this.renderFileList();
             this.outputLine(`Ran ${fileName}`);
         } catch (error) {
             this.outputLine(`Run error: ${error.message}`);
@@ -766,6 +904,8 @@ class DruidApp {
         const proposed = window.prompt('Rename file', oldName);
         if (proposed == null) return;
 
+        await this.refreshFileList();
+
         const newName = this.normalizeLuaFileName(proposed);
         if (!newName) {
             this.outputLine('Rename canceled: invalid filename');
@@ -776,10 +916,15 @@ class DruidApp {
             return;
         }
 
+        if (this.fileEntries.some((entry) => entry.name === newName)) {
+            this.outputLine(`Rename canceled: ${newName} already exists`);
+            return;
+        }
+
         try {
-            const content = await this.readRemoteFile(oldName);
-            await this.sendScriptTextToiii(newName, content);
-            await this.executeLuaCapture(`fs_remove_file(${this.luaQuote(oldName)})`);
+            await this.executeLuaCapture(
+                `local __d = fs_read_file(${this.luaQuote(oldName)}); if __d then fs_write_file(${this.luaQuote(newName)}, __d); fs_remove_file(${this.luaQuote(oldName)}) else error('rename failed: cannot read source file') end`
+            );
             this.outputLine(`Renamed ${oldName} to ${newName}`);
             await this.refreshFileList();
         } catch (error) {
@@ -809,9 +954,7 @@ class DruidApp {
             }, false);
         });
 
-        if (!this.elements.replPane) return;
-
-        this.elements.replPane.addEventListener('drop', async (event) => {
+        document.body.addEventListener('drop', async (event) => {
             const files = event.dataTransfer?.files;
             if (!files || files.length === 0) return;
 
@@ -824,18 +967,6 @@ class DruidApp {
             const text = await file.text();
             await this.uploadTextAsScript(file.name, text);
         });
-
-        this.elements.replPane.addEventListener('dragover', () => {
-            this.elements.replPane.style.opacity = '0.7';
-        });
-
-        this.elements.replPane.addEventListener('dragleave', () => {
-            this.elements.replPane.style.opacity = '1';
-        });
-
-        this.elements.replPane.addEventListener('drop', () => {
-            this.elements.replPane.style.opacity = '1';
-        });
     }
 
     restartDevice() {
@@ -847,6 +978,30 @@ class DruidApp {
         this.iiiDevice.writeLine('^^r');
     }
 
+    bootloaderDevice() {
+        if (!this.iiiDevice.isConnected) {
+            this.outputLine('Error: Not connected to usb device');
+            return;
+        }
+        this.outputLine('> ^^b');
+        this.iiiDevice.writeLine('^^b');
+    }
+
+    async reformatFs() {
+        if (!this.iiiDevice.isConnected) {
+            this.outputLine('Error: Not connected to usb device');
+            return;
+        }
+
+        try {
+            this.outputLine('> fs_reformat()');
+            await this.executeLuaCapture('fs_reformat()');
+            await this.refreshFileList();
+        } catch (error) {
+            this.outputLine(`Reformat error: ${error.message}`);
+        }
+    }
+
     showHelp() {
         this.outputLine('');
         this.outputLine(' iii commands:');
@@ -856,6 +1011,7 @@ class DruidApp {
         this.outputLine(' ^^z         reboot script');
         this.outputLine(' ^^r         reboot device');
         this.outputLine(' ^^b         reboot into bootloader mode');
+        this.outputLine(' fs_reformat() reformat filesystem');
         this.outputLine('');
         this.outputHTML('TODO: iii script reference link GOES HERE');
        
