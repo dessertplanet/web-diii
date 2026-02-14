@@ -33,7 +33,7 @@ body {
 
 .app-header {
     background-color: var(--bg-default);
-    border-bottom: 6px solid var(--neutral-heavy);
+    border-bottom: 6px solid var(--accent-hover);
     height: 6px;
     display: flex;
     align-items: center;
@@ -181,12 +181,12 @@ body {
     background-color: var(--bg-surface);
     border: 1px solid var(--neutral-trim);
     border-radius: 999px;
-    padding: 4px 10px;
+    padding: 6px 10px;
 }
 
 .repl-status-indicator {
-    width: 8px;
-    height: 8px;
+    width: 9px;
+    height: 9px;
     border-radius: 50%;
     background-color: var(--neutral-medium);
 }
@@ -196,7 +196,7 @@ body {
 }
 
 .repl-status-text {
-    font-size: 0.78rem;
+    font-size: 0.85rem;
     color: var(--neutral-medium);
 }
 
@@ -225,8 +225,25 @@ body {
     background-color: var(--bg-subdued);
 }
 
+.repl-input-row {
+    position: relative;
+}
+
+.repl-input-prompt {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    color: var(--neutral-medium);
+    font-family: monospace;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    user-select: none;
+    pointer-events: none;
+}
+
 .repl-input {
     width: 100%;
+    flex: 1;
     min-height: 68px;
     max-height: 220px;
     resize: vertical;
@@ -237,7 +254,7 @@ body {
     font-family: monospace;
     font-size: 0.9rem;
     line-height: 1.4;
-    padding: 10px;
+    padding: 10px 10px 10px 36px;
     outline: none;
 }
 
