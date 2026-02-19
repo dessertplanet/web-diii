@@ -6,6 +6,7 @@
 class iiiConnection {
     constructor() {
         this.port = null;
+        this.preferredPort = null;
         this.reader = null;
         this.writer = null;
         this.readableStreamClosed = null;
@@ -17,11 +18,17 @@ class iiiConnection {
         this._textEncoder = new TextEncoder();
     }
 
-    async connect() {
+    async connect(port = null) {
         try {
-            this.port = await navigator.serial.requestPort({
-                filters: [{ usbVendorId: 0xCAFE, usbProductId: 0x1101 }]
-            });
+            this.port = port || this.preferredPort;
+
+            if (!this.port) {
+                this.port = await navigator.serial.requestPort({
+                    filters: [{ usbVendorId: 0xCAFE, usbProductId: 0x1101 }]
+                });
+            }
+
+            this.preferredPort = this.port;
 
             await this.port.open({
                 baudRate: 115200,
@@ -149,6 +156,12 @@ class iiiConnection {
 class DruidApp {
     constructor() {
         this.iiiDevice = new iiiConnection();
+        this.selectedPort = null;
+        this.selectedPortInfo = null;
+        this.autoReconnectEnabled = false;
+        this.autoReconnectTimer = null;
+        this.reconnectDelayMs = 900;
+        this.isManualDisconnect = false;
 
         this.commandHistory = [];
         this.historyIndex = -1;
@@ -232,6 +245,11 @@ class DruidApp {
 
         this.iiiDevice.onDataReceived = (data) => this.handleiiiOutput(data);
         this.iiiDevice.onConnectionChange = (connected, error) => this.handleConnectionChange(connected, error);
+
+        if ('serial' in navigator) {
+            navigator.serial.addEventListener('connect', (event) => this.handleSerialPortConnect(event));
+            navigator.serial.addEventListener('disconnect', (event) => this.handleSerialPortDisconnect(event));
+        }
 
         this.setupDragAndDrop();
     }
@@ -484,21 +502,70 @@ class DruidApp {
         await this.connect();
     }
 
-    async connect() {
-        this.outputLine('Connecting to iii device...');
-        const connected = await this.iiiDevice.connect();
+    async connect(options = {}) {
+        const { auto = false } = options;
+
+        if (!auto) {
+            this.outputLine('Connecting to iii device...');
+        }
+
+        let reconnectPort = this.selectedPort;
+
+        if (reconnectPort && 'serial' in navigator) {
+            try {
+                const availablePorts = await navigator.serial.getPorts();
+                const matchingPort = this.findMatchingPort(availablePorts, reconnectPort, this.selectedPortInfo);
+                if (matchingPort) {
+                    reconnectPort = matchingPort;
+                    this.selectedPort = matchingPort;
+                }
+            } catch {
+                // ignore and fall back to the remembered port object
+            }
+        }
+
+        let connected = await this.iiiDevice.connect(reconnectPort);
+
+        if (!connected && this.selectedPort && !auto) {
+            this.selectedPort = null;
+            this.selectedPortInfo = null;
+            connected = await this.iiiDevice.connect();
+        }
+
         if (connected) {
+            this.selectedPort = this.iiiDevice.port;
+            this.selectedPortInfo = this.getPortInfo(this.selectedPort);
+            this.autoReconnectEnabled = true;
+            this.clearAutoReconnectTimer();
             this.setExplorerCollapsed(false);
             const deviceType = await this.updateConnectedDeviceLabel();
-            if (deviceType) {
+
+            if (auto) {
+                if (deviceType) {
+                    this.outputHTML(`<strong>${this.escapeHtml(deviceType)}</strong> reconnected.\n`);
+                } else {
+                    this.outputLine('Reconnected.');
+                }
+            } else if (deviceType) {
                 this.outputHTML(`<strong>${this.escapeHtml(deviceType)}</strong> connected! Ready to code.\n`);
             } else {
                 this.outputLine('Connected! Ready to code.');
             }
-            this.outputLine('Drag and drop a lua file here to auto-upload.');
-            this.outputLine('');
+
+            if (!auto) {
+                this.outputLine('Drag and drop a lua file here to auto-upload.');
+                this.outputLine('');
+            }
+
             await this.refreshFileList();
+            return true;
         }
+
+        if (auto) {
+            this.scheduleAutoReconnect();
+        }
+
+        return false;
     }
 
     async updateConnectedDeviceLabel() {
@@ -519,7 +586,13 @@ class DruidApp {
         }
     }
 
-    async disconnect() {
+    async disconnect(manual = true) {
+        this.isManualDisconnect = manual;
+        if (manual) {
+            this.autoReconnectEnabled = false;
+            this.clearAutoReconnectTimer();
+        }
+
         await this.iiiDevice.disconnect();
         this.outputLine('');
         this.outputLine('Disconnected from iii device.');
@@ -539,6 +612,7 @@ class DruidApp {
             this.elements.replStatusIndicator.classList.add('connected');
             this.elements.replStatusText.textContent = 'connected';
             this.elements.replInput?.focus();
+            this.isManualDisconnect = false;
             return;
         }
 
@@ -549,7 +623,107 @@ class DruidApp {
         if (error && error.includes('disconnected')) {
             this.outputLine('');
             this.outputLine(error);
+
+            if (this.autoReconnectEnabled && !this.isManualDisconnect && this.selectedPort) {
+                this.scheduleAutoReconnect();
+            }
         }
+
+        this.isManualDisconnect = false;
+    }
+
+    handleSerialPortConnect(event) {
+        if (!this.autoReconnectEnabled || this.iiiDevice.isConnected || !this.selectedPort) {
+            return;
+        }
+
+        const eventPort = event?.port;
+        if (eventPort && !this.isSamePort(eventPort, this.selectedPort, this.selectedPortInfo)) {
+            return;
+        }
+
+        this.scheduleAutoReconnect(150);
+    }
+
+    async handleSerialPortDisconnect(event) {
+        if (!this.selectedPort) {
+            return;
+        }
+
+        const eventPort = event?.port;
+        if (eventPort && !this.isSamePort(eventPort, this.selectedPort, this.selectedPortInfo)) {
+            return;
+        }
+
+        if (this.autoReconnectEnabled && !this.isManualDisconnect) {
+            if (this.iiiDevice.isConnected) {
+                await this.disconnect(false);
+            }
+            this.scheduleAutoReconnect();
+        }
+    }
+
+    getPortInfo(port) {
+        try {
+            return port?.getInfo?.() || null;
+        } catch {
+            return null;
+        }
+    }
+
+    isSamePort(portA, portB, preferredInfo = null) {
+        if (!portA || !portB) return false;
+        if (portA === portB) return true;
+
+        const infoA = this.getPortInfo(portA);
+        const infoB = preferredInfo || this.getPortInfo(portB);
+        if (!infoA || !infoB) return false;
+
+        return infoA.usbVendorId === infoB.usbVendorId
+            && infoA.usbProductId === infoB.usbProductId;
+    }
+
+    findMatchingPort(ports, preferredPort, preferredInfo = null) {
+        if (!Array.isArray(ports) || ports.length === 0) {
+            return null;
+        }
+
+        const exactMatch = ports.find((port) => port === preferredPort);
+        if (exactMatch) return exactMatch;
+
+        if (!preferredInfo) {
+            return null;
+        }
+
+        return ports.find((port) => {
+            const info = this.getPortInfo(port);
+            if (!info) return false;
+
+            return info.usbVendorId === preferredInfo.usbVendorId
+                && info.usbProductId === preferredInfo.usbProductId;
+        }) || null;
+    }
+
+    clearAutoReconnectTimer() {
+        if (!this.autoReconnectTimer) return;
+        clearTimeout(this.autoReconnectTimer);
+        this.autoReconnectTimer = null;
+    }
+
+    scheduleAutoReconnect(delay = this.reconnectDelayMs) {
+        if (!this.autoReconnectEnabled || this.iiiDevice.isConnected || !this.selectedPort || this.autoReconnectTimer) {
+            return;
+        }
+
+        this.autoReconnectTimer = setTimeout(async () => {
+            this.autoReconnectTimer = null;
+
+            if (!this.autoReconnectEnabled || this.iiiDevice.isConnected) {
+                return;
+            }
+
+            await this.connect({ auto: true });
+        }, delay);
     }
 
     handleiiiOutput(data) {
@@ -1136,7 +1310,7 @@ class DruidApp {
 
         this.reconnectAfterRestartTimer = setTimeout(async () => {
             if (!this.iiiDevice.isConnected) {
-                await this.connect();
+                await this.connect({ auto: true });
             }
             this.reconnectAfterRestartTimer = null;
         }, 1000);
