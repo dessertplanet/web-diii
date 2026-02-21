@@ -86,8 +86,32 @@ body {
     background-color: var(--bg-surface);
 }
 
+.explorer-resizer {
+    width: 6px;
+    flex: 0 0 6px;
+    background-color: var(--bg-default);
+    border-right: 1px solid var(--neutral-trim);
+    cursor: col-resize;
+    transition: background-color 120ms ease;
+}
+
+.explorer-resizer:hover,
+.explorer-resizer.dragging {
+    background-color: var(--neutral-trim);
+}
+
+.explorer-resizer:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+}
+
+.explorer-resizer.hidden {
+    display: none;
+}
+
 .repl-pane {
     width: 100%;
+    min-width: 320px;
     height: 100%;
     background-color: var(--bg-subdued);
     display: flex;
@@ -181,6 +205,12 @@ body {
 .file-explorer-pane.collapsed .file-explorer-header {
     justify-content: center;
     padding: 10px 0;
+}
+
+body.is-resizing-explorer,
+body.is-resizing-explorer * {
+    cursor: col-resize !important;
+    user-select: none;
 }
 
 .file-list {
