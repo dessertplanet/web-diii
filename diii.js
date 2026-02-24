@@ -208,8 +208,6 @@ class DruidApp {
         this.historyIndex = -1;
         this.currentInput = '';
         this.pendingLuaCapture = null;
-        this.pendingFilenameCapture = null;
-        this.activeFileName = null;
         this.reconnectAfterRestartTimer = null;
         this.toastTimer = null;
         this.toastElement = null;
@@ -698,7 +696,6 @@ class DruidApp {
             }
 
             if (containsCleanCommand) {
-                this.activeFileName = null;
                 this.renderFileList();
             }
 
@@ -819,7 +816,6 @@ class DruidApp {
         this.outputLine('');
         this.outputLine('disconnected');
         this.outputLine('');
-        this.activeFileName = null;
         this.fileFreeSpaceBytes = null;
         this.fileEntries = [];
         this.updateFileSpaceFooter(null);
@@ -972,10 +968,6 @@ class DruidApp {
         }
 
         if (this.handleLuaCaptureLine(cleaned)) {
-            return;
-        }
-
-        if (this.handleFilenameCaptureLine(cleaned)) {
             return;
         }
 
@@ -1190,10 +1182,11 @@ class DruidApp {
             const main = document.createElement('div');
             main.className = 'file-main';
             const isLibFile = entry.name === 'lib.lua';
+            const isInitLuaFile = entry.name === 'init.lua';
 
-            if (!isLibFile) {
+            if (!isLibFile && !isInitLuaFile) {
                 const playBtn = document.createElement('button');
-                playBtn.className = `file-play-btn${this.activeFileName === entry.name ? ' active' : ''}`;
+                playBtn.className = 'file-play-btn';
                 playBtn.type = 'button';
                 playBtn.textContent = '▶';
                 playBtn.setAttribute('aria-label', `run ${entry.name}`);
@@ -1231,8 +1224,6 @@ class DruidApp {
 
             const menu = document.createElement('div');
             menu.className = `file-menu${this.openMenuFile === entry.name ? ' open' : ''}`;
-
-            const isInitLuaFile = entry.name === 'init.lua';
 
             const actions = (isInitLuaFile
                 ? [
@@ -1327,38 +1318,6 @@ class DruidApp {
         return true;
     }
 
-    handleFilenameCaptureLine(line) {
-        const capture = this.pendingFilenameCapture;
-        if (!capture) return false;
-
-        const match = line.match(/^-- filename:\s*(.+)$/);
-        if (!match) return false;
-
-        clearTimeout(capture.timeoutId);
-        this.pendingFilenameCapture = null;
-        capture.resolve(match[1].trim());
-        return true;
-    }
-
-    async requestActiveFileName() {
-        if (!this.iiiDevice.isConnected) return null;
-        if (this.pendingFilenameCapture) {
-            throw new Error('File selection request already in progress');
-        }
-
-        const resultPromise = new Promise((resolve, reject) => {
-            const timeoutId = setTimeout(() => {
-                this.pendingFilenameCapture = null;
-                reject(new Error('Timed out waiting for filename response'));
-            }, 2500);
-
-            this.pendingFilenameCapture = { resolve, reject, timeoutId };
-        });
-
-        await this.iiiDevice.writeLine('^^g');
-        return resultPromise;
-    }
-
     async executeLuaCapture(commands) {
         if (!this.iiiDevice.isConnected) {
             throw new Error('Not connected to usb device');
@@ -1451,12 +1410,6 @@ class DruidApp {
                 await this.refreshFirstBadgeFileNames(entries);
             } catch {
                 this.firstBadgeFileNames = new Set();
-            }
-
-            try {
-                this.activeFileName = await this.requestActiveFileName();
-            } catch {
-                this.activeFileName = null;
             }
 
             this.updateFileSpaceFooter(this.fileFreeSpaceBytes);
@@ -1574,9 +1527,6 @@ class DruidApp {
         await this.delay(120);
 
         await this.executeLuaCapture("fs_run_file('lib.lua')");
-
-        this.activeFileName = null;
-        this.renderFileList();
     }
 
     async enqueueRunFile(fileName, options = {}) {
@@ -1605,8 +1555,6 @@ class DruidApp {
             for (const line of lines) {
                 this.outputLine(line);
             }
-            this.activeFileName = fileName;
-            this.renderFileList();
             this.outputLine(`Running ${fileName}`);
         } catch (error) {
             this.outputLine(`Run error: ${error.message}`);
