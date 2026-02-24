@@ -1239,7 +1239,7 @@ class DruidApp {
                     { label: 'delete', fn: () => this.deleteFile(entry.name) }
                 ]
                 : [
-                    { label: 'first', fn: () => this.copyToInit(entry.name) },
+                    { label: 'first', fn: () => this.configureFirst(entry.name) },
                     { label: 'read', fn: () => this.showFile(entry.name) },
                     { label: 'run', fn: () => this.enqueueRunFile(entry.name, { prepRuntimeWithLib: true }) },
                     { label: 'download', fn: () => this.downloadFile(entry.name) },
@@ -1500,15 +1500,15 @@ class DruidApp {
         return lines.join('\n');
     }
 
-    async copyToInit(fileName) {
+    async configureFirst(fileName) {
         try {
             await this.executeLuaCapture(
-                `local __d = fs_read_file(${this.luaQuote(fileName)}); if __d then fs_write_file('init.lua', __d) else error('copy failed: cannot read source file') end`
+                `if type(first) ~= 'function' then fs_run_file('lib.lua') end; first(${this.luaQuote(fileName)})`
             );
-            this.outputLine(`Copied ${fileName} to init.lua`);
+            this.outputLine(`${fileName} will now run at at startup`);
             await this.refreshFileList();
         } catch (error) {
-            this.outputLine(`Copy error: ${error.message}`);
+            this.outputLine(`First error: ${error.message}`);
         }
     }
 
