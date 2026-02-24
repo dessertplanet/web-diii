@@ -620,12 +620,13 @@ class DruidApp {
         this.outputLine(`>> ${code}`);
         const isHelpShortcut = /^h$/i.test(code.trim());
         const isUploadShortcut = /^u$/i.test(code.trim());
-        const containsFsCommand = /\bfs_[a-zA-Z0-9_]*\b/.test(code);
-        const containsFsRunFile = /\bfs_run_file\s*\(/.test(code);
-        const containsFsRemoveFile = /\bfs_remove_file\s*\(/.test(code);
-        const containsFsReformat = /\bfs_reformat\s*\(/.test(code);
+        const containsSystemCommand = /\b(?:ls|cat|rm|mem|first|require)\s*\(/.test(code);
+        const containsRequireCommand = /\brequire\s*\(/.test(code);
+        const containsRmCommand = /\brm\s*\(/.test(code);
+        const containsFirstCommand = /\bfirst\s*\(/.test(code);
+        const containsLsCommand = /\bls\s*\(/.test(code);
         const containsCleanCommand = /(?:^|\s)\^\^c(?:\s|$)/i.test(code);
-        const shouldAutoOpenExplorer = containsFsRunFile || containsFsRemoveFile || containsFsReformat;
+        const shouldAutoOpenExplorer = containsRequireCommand || containsRmCommand || containsFirstCommand || containsLsCommand;
 
         if (this.commandHistory.length === 0 || this.commandHistory[this.commandHistory.length - 1] !== code) {
             this.commandHistory.push(code);
@@ -655,18 +656,12 @@ class DruidApp {
             return;
         }
 
-        if (containsFsRemoveFile) {
-            const singleTargetMatch = code.match(/\bfs_remove_file\s*\(\s*['"]([^'"]+)['"]\s*\)/);
+        if (containsRmCommand) {
+            const singleTargetMatch = code.match(/\brm\s*\(\s*['"]([^'"]+)['"]\s*\)/);
             const promptLabel = singleTargetMatch
                 ? `Delete ${singleTargetMatch[1]}?`
-                : 'Run fs_remove_file command?';
+                : 'Run rm command?';
             if (!window.confirm(promptLabel)) {
-                return;
-            }
-        }
-
-        if (containsFsReformat) {
-            if (!window.confirm('Reformat filesystem? This will erase all files on your iii device.')) {
                 return;
             }
         }
@@ -690,7 +685,7 @@ class DruidApp {
                 this.setExplorerCollapsed(false);
             }
 
-            if (containsFsCommand) {
+            if (containsSystemCommand) {
                 await this.delay(150);
                 await this.refreshFileList();
             }
@@ -1015,6 +1010,11 @@ class DruidApp {
     updateFileSpaceFooter(bytes) {
         if (!this.elements.fileSpaceFooter) return;
 
+        if (typeof bytes === 'string' && bytes.trim()) {
+            this.elements.fileSpaceFooter.textContent = bytes.trim();
+            return;
+        }
+
         if (!Number.isFinite(Number(bytes))) {
             this.elements.fileSpaceFooter.textContent = 'free space: -- kb';
             return;
@@ -1086,7 +1086,7 @@ class DruidApp {
         const baseName = fileName;
         const lines = this.getUploadLines(text);
 
-        await this.executeLuaCapture(`fs_remove_file(${this.luaQuote(baseName)})`);
+        await this.executeLuaCapture(`rm(${this.luaQuote(baseName)})`);
 
         // Match diii upload protocol:
         // ^^s, <filename>, ^^f, ^^s, <file lines>, ^^w
@@ -1192,14 +1192,16 @@ class DruidApp {
                 playBtn.setAttribute('aria-label', `run ${entry.name}`);
                 playBtn.addEventListener('click', async (event) => {
                     event.stopPropagation();
-                    await this.enqueueRunFile(entry.name, { prepRuntimeWithLib: true });
+                    await this.enqueueRunFile(entry.name);
                 });
                 main.appendChild(playBtn);
             }
 
             const label = document.createElement('div');
             label.className = 'file-label';
-            label.textContent = `${entry.name} (${this.formatSizeKb(entry.size)})`;
+            label.textContent = Number.isFinite(entry.size)
+                ? `${entry.name} (${this.formatSizeKb(entry.size)})`
+                : entry.name;
 
             main.appendChild(label);
 
@@ -1228,7 +1230,6 @@ class DruidApp {
             const actions = (isInitLuaFile
                 ? [
                     { label: 'read', fn: () => this.showFile(entry.name) },
-                    { label: 'rename', fn: () => this.renameFile(entry.name) },
                     { label: 'delete', fn: () => this.deleteFile(entry.name) }
                 ]
                 : isLibFile
@@ -1239,9 +1240,8 @@ class DruidApp {
                     : [
                         { label: 'first', fn: () => this.configureFirst(entry.name) },
                         { label: 'read', fn: () => this.showFile(entry.name) },
-                        { label: 'run', fn: () => this.enqueueRunFile(entry.name, { prepRuntimeWithLib: true }) },
+                        { label: 'run', fn: () => this.enqueueRunFile(entry.name) },
                         { label: 'download', fn: () => this.downloadFile(entry.name) },
-                        { label: 'rename', fn: () => this.renameFile(entry.name) },
                         { label: 'delete', fn: () => this.deleteFile(entry.name) }
                     ])
                 .sort((a, b) => {
@@ -1385,23 +1385,22 @@ class DruidApp {
         }
 
         try {
-            const lines = await this.executeLuaCapture(
-                'local __free = fs_free_space() or 0; print("__webdiii_free\\t" .. tostring(__free)); for _, __name in ipairs(fs_list_files()) do local __size = fs_file_size(__name) or 0; print("__webdiii_file\\t" .. __name .. "\\t" .. tostring(__size)) end'
-            );
+            const lines = await this.executeLuaCapture([
+                'print("__webdiii_ls_begin")',
+                'ls()',
+                'print("__webdiii_ls_end")',
+                'print("__webdiii_free\t" .. tostring(fs_free_space() or 0))'
+            ]);
 
-            const entries = [];
+            const lsLines = this.extractLinesBetweenMarkers(lines, '__webdiii_ls_begin', '__webdiii_ls_end');
+            const entries = this.parseFileEntriesFromLs(lsLines);
+            this.fileFreeSpaceBytes = null;
+
             for (const line of lines) {
-                if (line.startsWith('__webdiii_free\t')) {
-                    const freeRaw = line.split('\t')[1];
-                    this.fileFreeSpaceBytes = Number.parseInt(freeRaw, 10);
-                    continue;
-                }
-                if (!line.startsWith('__webdiii_file\t')) continue;
-                const parts = line.split('\t');
-                if (parts.length < 3) continue;
-                const name = parts[1];
-                const size = Number.parseInt(parts[2], 10) || 0;
-                entries.push({ name, size });
+                if (!line.startsWith('__webdiii_free\t')) continue;
+                const freeRaw = line.split('\t')[1];
+                this.fileFreeSpaceBytes = Number.parseInt(freeRaw, 10);
+                break;
             }
 
             this.fileEntries = entries;
@@ -1430,6 +1429,62 @@ class DruidApp {
         return match?.[2]?.trim() || '';
     }
 
+    extractLinesBetweenMarkers(lines, beginMarker, endMarker) {
+        const captured = [];
+        let inSection = false;
+
+        for (const rawLine of lines) {
+            const line = String(rawLine || '').trim();
+            if (line === beginMarker) {
+                inSection = true;
+                continue;
+            }
+            if (line === endMarker) {
+                inSection = false;
+                continue;
+            }
+            if (inSection) {
+                captured.push(String(rawLine || ''));
+            }
+        }
+
+        return captured;
+    }
+
+    parseFileEntriesFromLs(lines) {
+        const entries = [];
+        const seenNames = new Set();
+
+        for (const rawLine of lines) {
+            const tokens = String(rawLine || '').trim().split(/\s+/).filter(Boolean);
+            for (const token of tokens) {
+                const cleaned = token.replace(/[,:;]+$/, '');
+                const isLua = cleaned.toLowerCase().endsWith('.lua');
+                const isInit = cleaned === 'init';
+                if (!isLua && !isInit) continue;
+                if (seenNames.has(cleaned)) continue;
+                seenNames.add(cleaned);
+                entries.push({ name: cleaned, size: null });
+            }
+        }
+
+        return entries;
+    }
+
+    parseMemoryFooterFromMem(lines) {
+        const cleanedLines = lines
+            .map((line) => String(line || '').trim())
+            .filter((line) => line.length > 0);
+
+        if (cleanedLines.length === 0) {
+            return null;
+        }
+
+        const bestLine = cleanedLines.find((line) => /\d/.test(line)) || cleanedLines[0];
+        const lowered = bestLine.toLowerCase();
+        return /^mem[:\s]/.test(lowered) ? lowered : `mem: ${lowered}`;
+    }
+
     async refreshFirstBadgeFileNames(entries) {
         const hasInitLua = entries.some((entry) => entry.name === 'init.lua');
         if (!hasInitLua) {
@@ -1452,17 +1507,13 @@ class DruidApp {
     }
 
     async readRemoteFile(fileName) {
-        const lines = await this.executeLuaCapture(
-            `local __webdiii_data = fs_read_file(${this.luaQuote(fileName)}); if __webdiii_data then print(__webdiii_data) end`
-        );
+        const lines = await this.executeLuaCapture(`cat(${this.luaQuote(fileName)})`);
         return lines.join('\n');
     }
 
     async configureFirst(fileName) {
         try {
-            await this.executeLuaCapture(
-                `if type(first) ~= 'function' then fs_run_file('lib.lua') end; first(${this.luaQuote(fileName)})`
-            );
+            await this.executeLuaCapture(`first(${this.luaQuote(fileName)})`);
             this.outputLine(`${fileName} will now run at at startup`);
             await this.refreshFileList();
         } catch (error) {
@@ -1504,7 +1555,7 @@ class DruidApp {
             afterHeaderSpacerLine.textContent = '\n';
             this.elements.output.appendChild(afterHeaderSpacerLine);
 
-            const lines = await this.executeLuaCapture(`print(fs_read_file(${this.luaQuote(fileName)}))`);
+            const lines = await this.executeLuaCapture(`cat(${this.luaQuote(fileName)})`);
             for (const line of lines) {
                 this.outputLine(line, { autoScroll: false });
             }
@@ -1519,19 +1570,9 @@ class DruidApp {
         }
     }
 
-    async prepareRuntimeWithLib() {
-        this.queueSuppressedOutputLine('-- re-init with no script');
-        this.queueSuppressedOutputLine('-- init: skip script');
-        this.queueSuppressedOutputLine('-- init: writing lib.lua');
-        await this.iiiDevice.writeLine('^^c');
-        await this.delay(120);
-
-        await this.executeLuaCapture("fs_run_file('lib.lua')");
-    }
-
-    async enqueueRunFile(fileName, options = {}) {
+    async enqueueRunFile(fileName) {
         const task = async () => {
-            await this.runFile(fileName, options);
+            await this.runFile(fileName);
             await this.refreshFileList();
         };
 
@@ -1542,16 +1583,9 @@ class DruidApp {
         return this.fileRunQueue;
     }
 
-    async runFile(fileName, options = {}) {
-        const { prepRuntimeWithLib = false } = options;
-
+    async runFile(fileName) {
         try {
-            if (prepRuntimeWithLib) {
-                await this.prepareRuntimeWithLib();
-            }
-
-            await this.openAndSelectRemoteFile(fileName);
-            const lines = await this.executeLuaCapture(`fs_run_file(${this.luaQuote(fileName)})`);
+            const lines = await this.executeLuaCapture(`require(${this.luaQuote(fileName)})`);
             for (const line of lines) {
                 this.outputLine(line);
             }
@@ -1561,51 +1595,13 @@ class DruidApp {
         }
     }
 
-    normalizeLuaFileName(rawName) {
-        const trimmed = String(rawName || '').trim();
-        if (!trimmed) return '';
-        return trimmed.toLowerCase().endsWith('.lua') ? trimmed : `${trimmed}.lua`;
-    }
-
-    async renameFile(oldName) {
-        const proposed = window.prompt('Rename file', oldName);
-        if (proposed == null) return;
-
-        await this.refreshFileList();
-
-        const newName = this.normalizeLuaFileName(proposed);
-        if (!newName) {
-            this.outputLine('Rename canceled: invalid filename');
-            return;
-        }
-
-        if (newName === oldName) {
-            return;
-        }
-
-        if (this.fileEntries.some((entry) => entry.name === newName)) {
-            this.showToast(`Rename blocked: ${newName} already exists`, 'warn');
-            return;
-        }
-
-        try {
-            await this.executeLuaCapture(
-                `local __d = fs_read_file(${this.luaQuote(oldName)}); if __d then fs_write_file(${this.luaQuote(newName)}, __d); fs_remove_file(${this.luaQuote(oldName)}) else error('rename failed: cannot read source file') end`
-            );
-            this.outputLine(`Renamed ${oldName} to ${newName}`);
-            await this.refreshFileList();
-        } catch (error) {
-            this.outputLine(`Rename error: ${error.message}`);
-        }
-    }
-
     async deleteFile(fileName) {
         if (!window.confirm(`Delete ${fileName}?`)) {
             return;
         }
 
         try {
-            await this.executeLuaCapture(`fs_remove_file(${this.luaQuote(fileName)})`);
+            await this.executeLuaCapture(`rm(${this.luaQuote(fileName)})`);
             this.outputLine(`Deleted ${fileName}`);
             await this.refreshFileList();
         } catch (error) {
