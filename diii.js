@@ -295,7 +295,7 @@ class DruidApp {
         });
 
         on(this.elements.scriptReferenceBtn, 'click', () => {
-            window.open('https://monome.org/docs/iii/', '_blank');
+            window.open('https://monome.org/docs/iii/code', '_blank');
         });
 
         this.iiiDevice.onDataReceived = (data) => this.handleiiiOutput(data);
