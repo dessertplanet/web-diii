@@ -1421,7 +1421,7 @@ class DruidApp {
         const content = String(initContent || '');
         const withoutBlockComments = content.replace(/--\[\[[\s\S]*?\]\]/g, '');
         const withoutLineComments = withoutBlockComments.replace(/--.*$/gm, '');
-        const match = withoutLineComments.match(/first\s*\(\s*(['"])([^'"]+)\1\s*\)/);
+        const match = withoutLineComments.match(/fs_run_file\s*\(\s*(['"])([^'"]+)\1\s*\)/);
         return match?.[2]?.trim() || '';
     }
 
