@@ -1060,7 +1060,9 @@ class DruidApp {
         await this.delay(100);
     }
 
-    async uploadTextAsScript(name, text) {
+    async uploadTextAsScript(name, text, options = {}) {
+        const { refreshList = true } = options;
+
         if (!this.iiiDevice.isConnected) {
             this.outputLine('Error: Not connected to usb device (click connect in the header)');
             return;
@@ -1069,7 +1071,9 @@ class DruidApp {
         try {
             this.outputLine(`Uploading ${name}...`);
             await this.sendScriptTextToiii(name, text);
-            await this.refreshFileList();
+            if (refreshList) {
+                await this.refreshFileList();
+            }
         } catch (error) {
             this.outputLine(`Upload error: ${error.message}`);
         }
@@ -1165,14 +1169,11 @@ class DruidApp {
             return null;
         }
 
+        // previous upload exists
         if (this.lastUploadedScript.fileHandle) {
             try {
                 const file = await this.lastUploadedScript.fileHandle.getFile();
-                if (!file.name.toLowerCase().endsWith('.lua')) {
-                    this.outputLine('Error: Last selected file is no longer a .lua file.');
-                    return null;
-                }
-
+                
                 return {
                     name: file.name,
                     text: await file.text(),
@@ -1213,18 +1214,24 @@ class DruidApp {
         if (!script) return;
 
         try {
-            this.outputLine(`r: ${script.refreshed ? 'refreshed' : 'reused'} ${script.name}`);
+            this.outputLine(`r: refreshing ${script.name}`);
+            this.queueSuppressedOutputLine('-- re-init with no script', 8000);
+            this.queueSuppressedOutputLine('-- init: writing lib.lua', 8000);
+            this.queueSuppressedOutputLine('-- init: skip script', 8000);
+            this.queueSuppressedOutputLine('-- lua lib', 8000);
             await this.iiiDevice.writeLine('^^c');
             await this.delay(200);
-            await this.uploadTextAsScript(script.name, script.text);
+            await this.uploadTextAsScript(script.name, script.text, { refreshList: false });
             this.cacheLastUploadedScript({
                 name: script.name,
                 text: script.text,
                 fileHandle: script.fileHandle
             });
             await this.executeLua(`fs_run_file("lib.lua")`);
-            await this.delay(120);
             await this.executeLua(`fs_run_file(${this.luaQuote(script.name)})`);
+            this.refreshFileList().catch((error) => {
+                this.outputLine(`File list error: ${error.message}`);
+            });
         } catch (error) {
             this.outputLine(`r command error: ${error.message}`);
         }
