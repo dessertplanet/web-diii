@@ -1086,7 +1086,7 @@ class DruidApp {
         const baseName = fileName;
         const lines = this.getUploadLines(text);
 
-        await this.executeLuaCapture(`rm(${this.luaQuote(baseName)})`);
+        await this.executeLuaCapture(`fs_remove_file(${this.luaQuote(baseName)})`);
 
         // Match diii upload protocol:
         // ^^s, <filename>, ^^f, ^^s, <file lines>, ^^w
@@ -1360,9 +1360,7 @@ class DruidApp {
         for (const rawLine of lines) {
             const line = String(rawLine).trim();
             if (!line) continue;
-            await this.iiiDevice.writeLine(
-                `do local __ok, __err = pcall(function() ${line} end); if not __ok then print(${this.luaQuote(errorPrefix)} .. tostring(__err)) end end`
-            );
+            await this.iiiDevice.writeLine(`${line}`);
         }
 
         await this.iiiDevice.writeLine(`print(${this.luaQuote(endToken)})`);
@@ -1390,7 +1388,7 @@ class DruidApp {
                 'for _, __name in ipairs(fs_list_files()) do local __size = fs_file_size(__name) or 0; print("__webdiii_file\\t" .. __name .. "\\t" .. tostring(__size)) end',
                 'print("__webdiii_ls_end")',
                 'print("__webdiii_mem_begin")',
-                'mem()',
+                'print(collectgarbage("count"))',
                 'print("__webdiii_mem_end")'
             ]);
 
@@ -1589,7 +1587,6 @@ class DruidApp {
     async enqueueRunFile(fileName) {
         const task = async () => {
             await this.runFile(fileName);
-            await this.refreshFileList();
         };
 
         this.fileRunQueue = this.fileRunQueue
@@ -1617,7 +1614,7 @@ class DruidApp {
         }
 
         try {
-            await this.executeLuaCapture(`rm(${this.luaQuote(fileName)})`);
+            await this.executeLuaCapture(`fs_remove_file(${this.luaQuote(fileName)})`);
             this.outputLine(`Deleted ${fileName}`);
             await this.refreshFileList();
         } catch (error) {
@@ -1711,7 +1708,6 @@ class DruidApp {
         this.outputLine(' help()       print iii api');
         this.outputLine('');
         this.outputHTML('Docs: <a href="https://monome.org/docs/iii/code" target="_blank" rel="noopener noreferrer">monome.org/docs/iii/code</a>\n');
-       
     }
 
     delay(ms) {
