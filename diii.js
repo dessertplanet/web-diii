@@ -218,6 +218,7 @@ class DruidApp {
         this.isExplorerCollapsed = true;
         this.fileRunQueue = Promise.resolve();
         this.pendingSuppressedOutputLines = [];
+        this.lastUploadedScript = null;
         this.explorerWidthStorageKey = 'webdiii.explorerWidth';
         this.explorerWidthDefault = 280;
         this.explorerWidthMin = 220;
@@ -619,7 +620,7 @@ class DruidApp {
         }
 
         if (isReUploadShortcut) {
-            // TODO: init, upload last, run
+            await this.refreshUploadAndRunLastScript();
             this.elements.replInput.value = '';
             this.historyIndex = -1;
             this.currentInput = '';
@@ -1074,28 +1075,165 @@ class DruidApp {
         }
     }
 
-    openUploadPicker() {
+    supportsFileSystemPicker() {
+        return typeof window?.showOpenFilePicker === 'function';
+    }
+
+    async chooseLuaFileWithHandle() {
+        if (!this.supportsFileSystemPicker()) {
+            return null;
+        }
+
+        try {
+            const handles = await window.showOpenFilePicker({
+                multiple: false,
+                excludeAcceptAllOption: true,
+                types: [{
+                    description: 'Lua scripts',
+                    accept: {
+                        'text/plain': ['.lua'],
+                        'application/x-lua': ['.lua']
+                    }
+                }]
+            });
+
+            const handle = handles?.[0];
+            if (!handle) return null;
+
+            const file = await handle.getFile();
+            return { file, handle };
+        } catch (error) {
+            if (error?.name === 'AbortError') {
+                return null;
+            }
+
+            this.outputLine(`File picker error: ${error.message}`);
+            return null;
+        }
+    }
+
+    async openUploadPicker() {
+        if (this.supportsFileSystemPicker()) {
+            const picked = await this.chooseLuaFileWithHandle();
+            if (!picked) return;
+            await this.uploadSelectedFile(picked.file, { fileHandle: picked.handle });
+            return;
+        }
+
         if (!this.elements.fileInput) return;
         this.elements.fileInput.value = '';
         this.elements.fileInput.click();
     }
 
-    async handleFileSelect(event) {
-        const file = event.target?.files?.[0];
-        if (!file) return;
+    cacheLastUploadedScript({ name, text, fileHandle = null }) {
+        if (!name || typeof text !== 'string') return;
+        this.lastUploadedScript = {
+            name,
+            text,
+            fileHandle
+        };
+    }
+
+    async uploadSelectedFile(file, options = {}) {
+        if (!file) return false;
 
         if (!file.name.toLowerCase().endsWith('.lua')) {
             this.outputLine('Error: Only .lua files are supported');
-            return;
+            return false;
         }
 
         try {
             this.setExplorerCollapsed(false);
             const text = await file.text();
             await this.uploadTextAsScript(file.name, text);
+            this.cacheLastUploadedScript({
+                name: file.name,
+                text,
+                fileHandle: options.fileHandle || null
+            });
+            return true;
         } catch (error) {
             this.outputLine(`Upload error: ${error.message}`);
+            return false;
         }
+    }
+
+    async getRefreshableLastScript() {
+        // no previous upload case
+        if (!this.lastUploadedScript) {
+            this.outputLine('No previous upload found. Use u to pick a lua file first.');
+            return null;
+        }
+
+        if (this.lastUploadedScript.fileHandle) {
+            try {
+                const file = await this.lastUploadedScript.fileHandle.getFile();
+                if (!file.name.toLowerCase().endsWith('.lua')) {
+                    this.outputLine('Error: Last selected file is no longer a .lua file.');
+                    return null;
+                }
+
+                return {
+                    name: file.name,
+                    text: await file.text(),
+                    fileHandle: this.lastUploadedScript.fileHandle,
+                    refreshed: true
+                };
+            } catch (error) {
+                this.outputLine(`Refresh error: ${error.message}`);
+                return null;
+            }
+        }
+
+        // this path is hit if browser doesn't support file system access API
+        if (!this.supportsFileSystemPicker()) {
+            this.openUploadPicker();
+            return null;
+        }
+
+        // this path is hit if browser DOES support file system access API
+        const picked = await this.chooseLuaFileWithHandle();
+        if (!picked) return null;
+
+        return {
+            name: picked.file.name,
+            text: await picked.file.text(),
+            fileHandle: picked.handle,
+            refreshed: true
+        };
+    }
+
+    async refreshUploadAndRunLastScript() {
+        if (!this.iiiDevice.isConnected) {
+            this.outputLine('no iii device connected.');
+            return;
+        }
+
+        const script = await this.getRefreshableLastScript();
+        if (!script) return;
+
+        try {
+            this.outputLine(`r: ${script.refreshed ? 'refreshed' : 'reused'} ${script.name}`);
+            await this.iiiDevice.writeLine('^^c');
+            await this.delay(200);
+            await this.uploadTextAsScript(script.name, script.text);
+            this.cacheLastUploadedScript({
+                name: script.name,
+                text: script.text,
+                fileHandle: script.fileHandle
+            });
+            await this.executeLua(`fs_run_file("lib.lua")`);
+            await this.delay(120);
+            await this.executeLua(`fs_run_file(${this.luaQuote(script.name)})`);
+        } catch (error) {
+            this.outputLine(`r command error: ${error.message}`);
+        }
+    }
+
+    async handleFileSelect(event) {
+        const file = event.target?.files?.[0];
+        if (!file) return;
+        await this.uploadSelectedFile(file);
     }
 
     handleDocumentClick(event) {
@@ -1601,15 +1739,7 @@ class DruidApp {
             if (!files || files.length === 0) return;
 
             const file = files[0];
-            if (!file.name.endsWith('.lua')) {
-                this.outputLine('Error: Only .lua files are supported');
-                return;
-            }
-
-            this.setExplorerCollapsed(false);
-
-            const text = await file.text();
-            await this.uploadTextAsScript(file.name, text);
+            await this.uploadSelectedFile(file);
         });
     }
 
@@ -1666,6 +1796,7 @@ class DruidApp {
         this.outputLine(' web-diii helpers:');
         this.outputLine(' h            show this help');
         this.outputLine(' u            open file picker (same as upload button)');
+        this.outputLine(' r            init, refresh last upload, run');
         this.outputLine(' Cmd/Ctrl+Shift+C  connect/disconnect');
         this.outputLine('');
         this.outputLine(' common iii commands:');
