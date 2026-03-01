@@ -208,6 +208,7 @@ class DruidApp {
         this.historyIndex = -1;
         this.currentInput = '';
         this.pendingLuaCapture = null;
+        this.luaCaptureSeq = 0;
         this.reconnectAfterRestartTimer = null;
         this.toastTimer = null;
         this.toastElement = null;
@@ -1408,18 +1409,12 @@ class DruidApp {
 
         if (line === capture.endToken) {
             clearTimeout(capture.timeoutId);
-            const { resolve, lines, error } = capture;
             this.pendingLuaCapture = null;
-            resolve({ lines, error });
+            capture.resolve(capture.lines);
             return true;
         }
 
         if (!capture.started) return false;
-
-        if (line.startsWith(capture.errorPrefix)) {
-            capture.error = line;
-            return true;
-        }
 
         capture.lines.push(line);
         return true;
@@ -1444,10 +1439,9 @@ class DruidApp {
             throw new Error('Device is busy, please try again');
         }
 
-        const captureId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+        const captureId = ++this.luaCaptureSeq;
         const beginToken = `__webdiii_begin:${captureId}`;
         const endToken = `__webdiii_end:${captureId}`;
-        const errorPrefix = '__webdiii_err:';
 
         const resultPromise = new Promise((resolve, reject) => {
             const timeoutId = setTimeout(() => {
@@ -1458,10 +1452,8 @@ class DruidApp {
             this.pendingLuaCapture = {
                 beginToken,
                 endToken,
-                errorPrefix,
                 started: false,
                 lines: [],
-                error: null,
                 timeoutId,
                 resolve,
                 reject
@@ -1482,11 +1474,7 @@ class DruidApp {
 
         await this.iiiDevice.writeLine(`print(${this.luaQuote(endToken)})`);
 
-        const result = await resultPromise;
-        if (result.error) {
-            throw new Error(result.error);
-        }
-        return result.lines;
+        return resultPromise;
     }
 
     async refreshFileList() {
@@ -1500,17 +1488,11 @@ class DruidApp {
         }
 
         try {
-            const lines = await this.executeLuaCapture([
-                'print("__webdiii_ls_begin")',
-                'for _, __name in ipairs(fs_list_files()) do local __size = fs_file_size(__name) or 0; print("__webdiii_file\\t" .. __name .. "\\t" .. tostring(__size)) end',
-                'print("__webdiii_ls_end")',
-                'print("__webdiii_mem_begin")',
-                'print(fs_free_space())',
-                'print("__webdiii_mem_end")'
-            ]);
+            const lsLines = await this.executeLuaCapture(
+                'for _, __name in ipairs(fs_list_files()) do local __size = fs_file_size(__name) or 0; print("__webdiii_file\\t" .. __name .. "\\t" .. tostring(__size)) end'
+            );
+            const memLines = await this.executeLuaCapture('print(fs_free_space())');
 
-            const lsLines = this.extractLinesBetweenMarkers(lines, '__webdiii_ls_begin', '__webdiii_ls_end');
-            const memLines = this.extractLinesBetweenMarkers(lines, '__webdiii_mem_begin', '__webdiii_mem_end');
             const entries = this.parseFileEntriesFromLs(lsLines);
             this.fileFreeSpaceBytes = this.parseMemoryFooterFromMem(memLines);
 
@@ -1540,28 +1522,6 @@ class DruidApp {
         return match?.[2]?.trim() || '';
     }
 
-    extractLinesBetweenMarkers(lines, beginMarker, endMarker) {
-        const captured = [];
-        let inSection = false;
-
-        for (const rawLine of lines) {
-            const line = String(rawLine || '').trim();
-            if (line === beginMarker) {
-                inSection = true;
-                continue;
-            }
-            if (line === endMarker) {
-                inSection = false;
-                continue;
-            }
-            if (inSection) {
-                captured.push(String(rawLine || ''));
-            }
-        }
-
-        return captured;
-    }
-
     parseFileEntriesFromLs(lines) {
         const entries = [];
         const seenNames = new Set();
@@ -1569,55 +1529,30 @@ class DruidApp {
         for (const rawLine of lines) {
             const line = String(rawLine || '').trim();
 
-            if (line.startsWith('__webdiii_file\t')) {
-                const parts = line.split('\t');
-                if (parts.length >= 3) {
-                    const name = String(parts[1] || '').trim();
-                    const isLua = name.toLowerCase().endsWith('.lua');
-                    const isInit = name === 'init';
-                    if (!isLua && !isInit) continue;
-                    if (seenNames.has(name)) continue;
-                    seenNames.add(name);
-                    const parsedSize = Number.parseInt(parts[2], 10);
-                    entries.push({
-                        name,
-                        size: Number.isFinite(parsedSize) ? parsedSize : null
-                    });
-                    continue;
-                }
-            }
+            if (!line.startsWith('__webdiii_file\t')) continue;
 
-            const tokens = line.split(/\s+/).filter(Boolean);
-            for (const token of tokens) {
-                const cleaned = token.replace(/[,:;]+$/, '');
-                const isLua = cleaned.toLowerCase().endsWith('.lua');
-                const isInit = cleaned === 'init';
-                if (!isLua && !isInit) continue;
-                if (seenNames.has(cleaned)) continue;
-                seenNames.add(cleaned);
-                entries.push({ name: cleaned, size: null });
-            }
+            const parts = line.split('\t');
+            if (parts.length < 3) continue;
+
+            const name = String(parts[1] || '').trim();
+            const isLua = name.toLowerCase().endsWith('.lua');
+            const isInit = name === 'init';
+            if (!isLua && !isInit) continue;
+            if (seenNames.has(name)) continue;
+            seenNames.add(name);
+
+            const parsedSize = Number.parseInt(parts[2], 10);
+            entries.push({
+                name,
+                size: Number.isFinite(parsedSize) ? parsedSize : null
+            });
         }
 
         return entries;
     }
 
     parseMemoryFooterFromMem(lines) {
-        const cleanedLines = lines
-            .map((line) => String(line || '').trim())
-            .filter((line) => line.length > 0);
-
-        if (cleanedLines.length === 0) {
-            return null;
-        }
-
-        const bestLine = cleanedLines.find((line) => /\d/.test(line)) || cleanedLines[0];
-        const numericMatch = bestLine.match(/-?\d+/);
-        if (!numericMatch) {
-            return null;
-        }
-
-        const bytes = Number.parseInt(numericMatch[0], 10);
+        const bytes = Number.parseInt(lines[0], 10);
         return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
     }
 
