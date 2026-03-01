@@ -1,5 +1,5 @@
 /**
- * web-diii REPL-only app
+ * diii web app
  * Minimal serial REPL + script browser iii devices.
  */
 
@@ -192,7 +192,7 @@ class iiiConnection {
     }
 }
 
-class DruidApp {
+class diiiApp {
     constructor() {
         this.iiiDevice = new iiiConnection();
         this.selectedPort = null;
@@ -1713,7 +1713,7 @@ class DruidApp {
 
     showHelp() {
         this.outputLine('');
-        this.outputLine(' web-diii helpers:');
+        this.outputLine(' diii helpers:');
         this.outputLine(' h            show this help');
         this.outputLine(' u            open file picker (same as upload button)');
         this.outputLine(' r            init, refresh last upload, run');
@@ -1733,7 +1733,7 @@ class DruidApp {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    new DruidApp();
+    new diiiApp();
 
     if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js').catch((error) => {
