@@ -218,6 +218,7 @@ class DruidApp {
         this.isExplorerCollapsed = true;
         this.fileRunQueue = Promise.resolve();
         this.pendingSuppressedOutputLines = [];
+        this.lastUploadedScript = null;
         this.explorerWidthStorageKey = 'webdiii.explorerWidth';
         this.explorerWidthDefault = 280;
         this.explorerWidthMin = 220;
@@ -596,6 +597,7 @@ class DruidApp {
         this.outputLine(`>> ${code}`);
         const isHelpShortcut = /^h$/i.test(code.trim());
         const isUploadShortcut = /^u$/i.test(code.trim());
+        const isReUploadShortcut = /^r$/i.test(code.trim());
 
         if (this.commandHistory.length === 0 || this.commandHistory[this.commandHistory.length - 1] !== code) {
             this.commandHistory.push(code);
@@ -611,6 +613,14 @@ class DruidApp {
 
         if (isUploadShortcut) {
             this.openUploadPicker();
+            this.elements.replInput.value = '';
+            this.historyIndex = -1;
+            this.currentInput = '';
+            return;
+        }
+
+        if (isReUploadShortcut) {
+            await this.refreshUploadAndRunLastScript();
             this.elements.replInput.value = '';
             this.historyIndex = -1;
             this.currentInput = '';
@@ -1051,7 +1061,9 @@ class DruidApp {
         await this.delay(100);
     }
 
-    async uploadTextAsScript(name, text) {
+    async uploadTextAsScript(name, text, options = {}) {
+        const { refreshList = true } = options;
+
         if (!this.iiiDevice.isConnected) {
             this.outputLine('Error: Not connected to usb device (click connect in the header)');
             return;
@@ -1060,34 +1072,175 @@ class DruidApp {
         try {
             this.outputLine(`Uploading ${name}...`);
             await this.sendScriptTextToiii(name, text);
-            await this.refreshFileList();
+            if (refreshList) {
+                await this.refreshFileList();
+            }
         } catch (error) {
             this.outputLine(`Upload error: ${error.message}`);
         }
     }
 
-    openUploadPicker() {
+    supportsFileSystemPicker() {
+        return typeof window?.showOpenFilePicker === 'function';
+    }
+
+    async chooseLuaFileWithHandle() {
+        if (!this.supportsFileSystemPicker()) {
+            return null;
+        }
+
+        try {
+            const handles = await window.showOpenFilePicker({
+                multiple: false,
+                excludeAcceptAllOption: true,
+                types: [{
+                    description: 'Lua scripts',
+                    accept: {
+                        'text/plain': ['.lua'],
+                        'application/x-lua': ['.lua']
+                    }
+                }]
+            });
+
+            const handle = handles?.[0];
+            if (!handle) return null;
+
+            const file = await handle.getFile();
+            return { file, handle };
+        } catch (error) {
+            if (error?.name === 'AbortError') {
+                return null;
+            }
+
+            this.outputLine(`File picker error: ${error.message}`);
+            return null;
+        }
+    }
+
+    async openUploadPicker() {
+        if (this.supportsFileSystemPicker()) {
+            const picked = await this.chooseLuaFileWithHandle();
+            if (!picked) return;
+            await this.uploadSelectedFile(picked.file, { fileHandle: picked.handle });
+            return;
+        }
+
         if (!this.elements.fileInput) return;
         this.elements.fileInput.value = '';
         this.elements.fileInput.click();
     }
 
-    async handleFileSelect(event) {
-        const file = event.target?.files?.[0];
-        if (!file) return;
+    cacheLastUploadedScript({ name, text, fileHandle = null }) {
+        if (!name || typeof text !== 'string') return;
+        this.lastUploadedScript = {
+            name,
+            text,
+            fileHandle
+        };
+    }
+
+    async uploadSelectedFile(file, options = {}) {
+        if (!file) return false;
 
         if (!file.name.toLowerCase().endsWith('.lua')) {
             this.outputLine('Error: Only .lua files are supported');
-            return;
+            return false;
         }
 
         try {
             this.setExplorerCollapsed(false);
             const text = await file.text();
             await this.uploadTextAsScript(file.name, text);
+            this.cacheLastUploadedScript({
+                name: file.name,
+                text,
+                fileHandle: options.fileHandle || null
+            });
+            return true;
         } catch (error) {
             this.outputLine(`Upload error: ${error.message}`);
+            return false;
         }
+    }
+
+    async getRefreshableLastScript() {
+        // no previous upload case
+        if (!this.lastUploadedScript) {
+            this.outputLine('No previous upload found. Use u to pick a lua file first.');
+            return null;
+        }
+
+        // previous upload exists
+        if (this.lastUploadedScript.fileHandle) {
+            try {
+                const file = await this.lastUploadedScript.fileHandle.getFile();
+                
+                return {
+                    name: file.name,
+                    text: await file.text(),
+                    fileHandle: this.lastUploadedScript.fileHandle,
+                    refreshed: true
+                };
+            } catch (error) {
+                this.outputLine(`Refresh error: ${error.message}`);
+                return null;
+            }
+        }
+
+        // this path is hit if browser doesn't support file system access API
+        if (!this.supportsFileSystemPicker()) {
+            this.openUploadPicker();
+            return null;
+        }
+
+        // this path is hit if browser DOES support file system access API
+        const picked = await this.chooseLuaFileWithHandle();
+        if (!picked) return null;
+
+        return {
+            name: picked.file.name,
+            text: await picked.file.text(),
+            fileHandle: picked.handle,
+            refreshed: true
+        };
+    }
+
+    async refreshUploadAndRunLastScript() {
+        if (!this.iiiDevice.isConnected) {
+            this.outputLine('no iii device connected.');
+            return;
+        }
+
+        const script = await this.getRefreshableLastScript();
+        if (!script) return;
+
+        try {
+            this.outputLine(`r: refreshing ${script.name}`);
+            this.queueSuppressedOutputLine('-- re-init with no script', 8000);
+            this.queueSuppressedOutputLine('-- init: skip script', 8000);
+            this.queueSuppressedOutputLine('-- lua lib', 8000);
+            await this.iiiDevice.writeLine('^^c');
+            await this.delay(200);
+            await this.uploadTextAsScript(script.name, script.text, { refreshList: false });
+            this.cacheLastUploadedScript({
+                name: script.name,
+                text: script.text,
+                fileHandle: script.fileHandle
+            });
+            await this.executeLua(`fs_run_file("lib.lua")`);
+            await this.executeLua(`fs_run_file(${this.luaQuote(script.name)})`);
+            this.refreshFileList().catch((error) => {
+                this.outputLine(`File list error: ${error.message}`);
+            });
+        } catch (error) {
+            this.outputLine(`r command error: ${error.message}`);
+        }
+    }
+
+    async handleFileSelect(event) {
+        const file = event.target?.files?.[0];
+        if (!file) return;
+        await this.uploadSelectedFile(file);
     }
 
     handleDocumentClick(event) {
@@ -1559,7 +1712,14 @@ class DruidApp {
     }
 
     async runFile(fileName) {
-        await this.executeLua(`require(${this.luaQuote(fileName)})`);
+        this.queueSuppressedOutputLine('-- re-init with no script', 8000);
+        this.queueSuppressedOutputLine('-- init: skip script', 8000);
+        this.queueSuppressedOutputLine('-- lua lib', 8000);
+        await this.iiiDevice.writeLine('^^c');
+        await this.delay(500);
+        await this.executeLua(`fs_run_file("lib.lua")`);
+        await this.delay(500);
+        await this.executeLua(`fs_run_file(${this.luaQuote(fileName)})`);
     }
 
     async deleteFile(fileName) {
@@ -1589,15 +1749,7 @@ class DruidApp {
             if (!files || files.length === 0) return;
 
             const file = files[0];
-            if (!file.name.endsWith('.lua')) {
-                this.outputLine('Error: Only .lua files are supported');
-                return;
-            }
-
-            this.setExplorerCollapsed(false);
-
-            const text = await file.text();
-            await this.uploadTextAsScript(file.name, text);
+            await this.uploadSelectedFile(file);
         });
     }
 
@@ -1654,6 +1806,7 @@ class DruidApp {
         this.outputLine(' web-diii helpers:');
         this.outputLine(' h            show this help');
         this.outputLine(' u            open file picker (same as upload button)');
+        this.outputLine(' r            init, refresh last upload, run');
         this.outputLine(' Cmd/Ctrl+Shift+C  connect/disconnect');
         this.outputLine('');
         this.outputLine(' common iii commands:');
